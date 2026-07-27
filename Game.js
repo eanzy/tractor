@@ -1,13 +1,16 @@
 const {
   RANKS, buildShoe, shuffle, computeDealPlan, isTrump,
   cardStrength, pointValue, suitGroup, cardKey, classifyCombo, comboStrength, totalPoints,
+  SUIT_SYMBOL, cardLabel,
 } = require('./cardLogic');
 
-const BID_WINDOW_MS = 20000;
 const FRIEND_CALL_WINDOW_MS = 30000;
 const KITTY_WINDOW_MS = 45000;
 const BID_TIEBREAK_WINDOW_MS = 15000;
 const TRUMP_SELECT_WINDOW_MS = 20000;
+
+const BID_TIMER_OPTIONS_MS = [0, 30000, 60000]; // 0 = no timer, players bid on their own schedule
+const DEFAULT_BID_TIMER_MS = 30000;
 
 const MIN_BID_POINTS = 40;
 const MAX_BID_POINTS = 200;
@@ -20,7 +23,7 @@ const MAX_CHECKPOINT_EXTRA = 5;
 function friendsNeeded(numPlayers) {
   if (numPlayers === 3) return 0; // 3-player games: declarer plays solo against the other two, no friend calling
   // declarer's side should end up the (rounded-up) majority
-  const declarerTeamSize = Math.ceil(numPlayers / 2);
+  const declarerTeamSize = Math.floor(numPlayers / 2);
   return declarerTeamSize - 1;
 }
 
@@ -43,6 +46,7 @@ class Game {
       // i.e. vanilla single-win advancement through that rank)
       checkpoints: { '5': 0, '10': 0, 'K': 0, 'A': 0 },
       loserSkipsBidding: false, // see determineLoserBidBlock()
+      bidTimerMs: DEFAULT_BID_TIMER_MS, // 0 = no timer, else one of BID_TIMER_OPTIONS_MS
     };
 
     this.round = null; // transient round state, see resetRoundState()
@@ -62,6 +66,12 @@ class Game {
     if (this.phase !== 'lobby') throw new Error('Settings can only be changed before the game starts');
     if (typeof patch.negativeScores === 'boolean') this.settings.negativeScores = patch.negativeScores;
     if (typeof patch.loserSkipsBidding === 'boolean') this.settings.loserSkipsBidding = patch.loserSkipsBidding;
+    if (patch.bidTimerMs !== undefined) {
+      if (!BID_TIMER_OPTIONS_MS.includes(patch.bidTimerMs)) {
+        throw new Error(`Bid timer must be one of: ${BID_TIMER_OPTIONS_MS.join(', ')} ms`);
+      }
+      this.settings.bidTimerMs = patch.bidTimerMs;
+    }
     if (patch.checkpoints && typeof patch.checkpoints === 'object') {
       for (const rank of CHECKPOINT_RANKS) {
         const v = patch.checkpoints[rank];
@@ -119,6 +129,35 @@ class Game {
     if (p) p.connected = false;
   }
 
+  // A disconnected player (network drop, page refresh, etc.) keeps their seat, hand, level,
+  // and host/declarer status under their original id — only a fresh socket connection needs to
+  // be re-linked to it. server.js matches by name against currently-disconnected players to find
+  // who to reconnect, then calls this to mark them live again.
+  findDisconnectedByName(name) {
+    return this.players.find(p => !p.connected && p.name === name);
+  }
+
+  reconnectPlayer(id) {
+    const p = this.getPlayer(id);
+    if (p) p.connected = true;
+  }
+
+  // Fully removes a player from the table (unlike removePlayer(), which just marks a
+  // disconnected player offline so they can be seen mid-game). Only valid before the game
+  // starts, so seats can just be re-numbered contiguously afterward with no round in progress
+  // to disrupt.
+  kickPlayer(hostId, targetId) {
+    if (hostId !== this.hostId) throw new Error('Only the host can kick players');
+    if (this.phase !== 'lobby') throw new Error('Players can only be kicked before the game starts');
+    if (targetId === hostId) throw new Error("You can't kick yourself");
+    const idx = this.players.findIndex(p => p.id === targetId);
+    if (idx === -1) throw new Error('Player not found');
+    const [kicked] = this.players.splice(idx, 1);
+    this.players.forEach((p, i) => { p.seat = i; });
+    this.addLog(`${kicked.name} was removed from the table by the host.`);
+    return kicked.id;
+  }
+
   getPlayer(id) {
     return this.players.find(p => p.id === id);
   }
@@ -135,7 +174,9 @@ class Game {
       })),
       gameWonBy: this.gameWonBy,
       settings: this.settings,
-      log: this.log.slice(-40),
+      // generous cap: a full round's play-by-play (every card played, every trick winner) can
+      // easily run several hundred lines with a large hand, so 40 would truncate mid-round
+      log: this.log.slice(-1000),
     };
     if (!this.round) return base;
 
@@ -174,6 +215,7 @@ class Game {
       turnSeat: r.turnSeat,
       leaderSeat: r.leaderSeat,
       currentTrick: r.currentTrick, // [{seat, cards}]
+      lastTrick: r.lastTrick, // previous trick's plays, shown until the next lead is played
       trickCount: r.trickCount,
       totalTricks: r.totalTricks,
       scoreA: r.scoreA, // points captured by non-declarer(challenger) side this round, conventionally tracked on team B
@@ -193,8 +235,8 @@ class Game {
     }
   }
 
-  addLog(msg) {
-    this.log.push({ t: Date.now(), msg });
+  addLog(msg, opts = {}) {
+    this.log.push({ t: Date.now(), msg, bold: !!opts.bold });
   }
 
   // ---------------- ROUND SETUP ----------------
@@ -235,7 +277,8 @@ class Game {
       bids: {}, // playerId -> points, hidden from other players until bidding closes
       bidPasses: new Set(),
       blockedBidderId: null, // set below if "loser skips every other round" is on
-      bidDeadline: Date.now() + BID_WINDOW_MS,
+      // null bidDeadline means no timer -- bidding only ends once everyone's bid or passed
+      bidDeadline: this.settings.bidTimerMs > 0 ? Date.now() + this.settings.bidTimerMs : null,
       bidTiebreak: null, // { value, tiedValue, contenders: [id], answers: {id: bool}, deadline }
       trumpSelectDeadline: null,
       kittyDeadline: null,
@@ -247,9 +290,14 @@ class Game {
       turnSeat: null,
       leaderSeat: null,
       currentTrick: [],
+      lastTrick: null, // snapshot of the just-finished trick, kept around for display until the next lead
       trickCount: 0,
       totalTricks: perPlayer, // each player plays perPlayer/comboSize tricks worth of cards but tracked as cards remaining
       scoreA: 0,
+      // while friend identities are still unknown, trick points go to whoever won them
+      // individually rather than the shared challenger total (see resolveTrick()/finalizeTeams())
+      individualScores: {},
+      pendingFriendReveal: false,
       capturedCards: [],
       lastTrickWinnerSeat: null,
       roundResult: null,
@@ -305,7 +353,7 @@ class Game {
 
   bidWindowExpired() {
     const r = this.round;
-    return this.phase === 'bidding' && Date.now() >= r.bidDeadline;
+    return this.phase === 'bidding' && r.bidDeadline !== null && Date.now() >= r.bidDeadline;
   }
 
   resolveBidding() {
@@ -421,7 +469,7 @@ class Game {
     if (playerId !== r.declarerId) throw new Error('Only the declarer chooses trump');
     if (!['S', 'H', 'D', 'C', 'NT'].includes(suit)) throw new Error('Invalid suit');
     r.trumpSuit = suit;
-    this.addLog(`${this.getPlayer(playerId).name} calls trump: ${suit === 'NT' ? 'Joker (no-trump)' : suit}.`);
+    this.addLog(`${this.getPlayer(playerId).name} calls trump: ${suit === 'NT' ? 'Joker (no-trump)' : SUIT_SYMBOL[suit]}.`);
     this.resortAllHandsForTrump();
     this.beginKittyPhase();
   }
@@ -484,7 +532,7 @@ class Game {
       if (c.suit === 'JOKER') throw new Error("Can't call a joker as a friend card");
     }
     r.friendCalls = calls;
-    this.addLog(`${this.getPlayer(playerId).name} called for friends holding: ${calls.map(c => c.rank + c.suit).join(', ')}`);
+    this.addLog(`${this.getPlayer(playerId).name} called for friends holding: ${calls.map(c => cardLabel(c)).join(', ')}`);
     this.assignFriendTeams();
     this.beginPlay();
   }
@@ -498,17 +546,33 @@ class Game {
     r.teams = {};
     for (const p of this.players) r.teams[p.id] = 'B';
     r.teams[r.declarerId] = 'A';
-    // Friends are revealed progressively as their called card is played; until then they're provisionally on B.
+    // Friends are revealed progressively as their called card is played; until then they're
+    // provisionally on B, and their trick points accrue individually (see resolveTrick()) since
+    // we don't yet know whether they'll turn out to be a friend.
     r.pendingFriendReveal = r.friendCalls.length > 0;
+    r.individualScores = {};
   }
 
   assignSoloDeclarerTeam() {
     const r = this.round;
     r.teams = {};
-    // 3-player games: declarer is team A alone, the other two are team B
     for (const p of this.players) {
       r.teams[p.id] = (p.id === r.declarerId) ? 'A' : 'B';
     }
+    r.pendingFriendReveal = false; // no friend calls in solo mode, teams are known from the start
+  }
+
+  // Every friend call has now been claimed, so team membership for the rest of the round is
+  // certain. Whatever the (still-provisional-B) players individually accrued while identities
+  // were unknown now combines into the shared challenger total.
+  finalizeTeams() {
+    const r = this.round;
+    for (const [playerId, pts] of Object.entries(r.individualScores)) {
+      if (r.teams[playerId] === 'B') r.scoreA += pts;
+    }
+    r.individualScores = {};
+    r.pendingFriendReveal = false;
+    this.addLog('All friends have been revealed — teams are finalized and points are combined.');
   }
 
   // ---------------- TRICK PLAY ----------------
@@ -542,7 +606,7 @@ class Game {
     if (cards.some(c => !c)) throw new Error('Card not in hand');
     if (new Set(cardIds).size !== cardIds.length) throw new Error('Duplicate card in play');
 
-    let actualCards = cards; // may get downgraded below if a combo throw doesn't hold up
+    let actualCards = cards; 
 
     const isLeader = r.currentTrick.length === 0;
     if (isLeader) {
@@ -551,7 +615,7 @@ class Game {
       if (combo.type === 'mixed') {
         actualCards = this.resolveComboThrow(playerId, cards);
       }
-      // single/pair/triple/quadruple/tractor are all valid leads as-is
+      r.lastTrick = null; // the new trick is starting, stop showing the previous one
     } else {
       const leadCards = r.currentTrick[0].cards;
       if (cards.length !== leadCards.length) throw new Error(`Must play ${leadCards.length} card(s)`);
@@ -564,9 +628,6 @@ class Game {
         if (usedFromGroup < required) {
           throw new Error(`You must follow suit: play cards from ${leadGroup === 'TRUMP' ? 'trump' : leadGroup} first`);
         }
-        // if we hold enough cards in the led group to fully match its length, we're also bound
-        // to use up any pairs/triples we hold (even if that means breaking a tractor apart) —
-        // you can't sit on a pair while feeding singles into a triple/quadruple/pair lead
         if (cardsInLeadGroup.length >= leadCards.length && ['pair', 'triple', 'quadruple'].includes(leadCombo.type)) {
           this.enforceShapeFollow(leadCombo, cardsInLeadGroup, cards);
         }
@@ -578,6 +639,7 @@ class Game {
     const actualIds = new Set(actualCards.map(c => c.id));
     r.hands[playerId] = hand.filter(c => !actualIds.has(c.id));
     r.currentTrick.push({ seat: player.seat, playerId, cards: actualCards });
+    this.addLog(`${player.name} played: ${actualCards.map(c => cardLabel(c)).join(', ')}`);
 
     // reveal friend if this play contains a called friend card (find-a-friend mode) and not yet revealed
     if (r.friendCalls && r.friendCalls.length && r.teams[playerId] !== 'A') {
@@ -587,7 +649,13 @@ class Game {
         if (actualCards.some(c => c.suit === call.suit && c.rank === call.rank)) {
           r.teams[playerId] = 'A';
           r.revealedFriends.push(call);
-          this.addLog(`${player.name} revealed as a friend! (played the called ${call.rank}${call.suit})`);
+          this.addLog(`${player.name} revealed as a friend! (played the called ${cardLabel(call)})`);
+          // they joined the defenders -- whatever they'd individually accrued is released,
+          // not counted toward anyone's score
+          delete r.individualScores[playerId];
+          if (r.revealedFriends.length === r.friendCalls.length) {
+            this.finalizeTeams();
+          }
         }
       }
     }
@@ -600,14 +668,6 @@ class Game {
   }
 
   // ---------------- COMBO THROWS ----------------
-  // A lead doesn't have to be a single/pair/tractor — a player can throw an arbitrary bundle
-  // of cards from one suit-group (e.g. a pair of Kings plus a lone Ace) as a "combo", claiming
-  // every piece of it is currently the strongest remaining card/pair/triple/quad of its kind.
-  // Nothing stops a player from trying this even if it's wrong — there's no legality check
-  // against the claim itself, only against the actual cards in play. If it turns out someone
-  // else genuinely holds a stronger matching card/pair/triple/quad, the throw fails: only the
-  // single weakest card from the attempted combo actually gets led (the rest stays in hand),
-  // and everyone is told the throw got called out.
   resolveComboThrow(playerId, cards) {
     const r = this.round;
     const group = suitGroup(cards[0], r.trumpSuit, r.levelRank);
@@ -647,7 +707,7 @@ class Game {
 
     const weakest = cards.reduce((min, c) =>
       cardStrength(c, r.trumpSuit, r.levelRank) < cardStrength(min, r.trumpSuit, r.levelRank) ? c : min);
-    const comboDesc = cards.map(c => (c.suit === 'JOKER' ? c.rank : c.rank + c.suit)).join(', ');
+    const comboDesc = cards.map(c => cardLabel(c)).join(', ');
     this.addLog(`${this.getPlayer(playerId).name} tried to throw a combo (${comboDesc}) but it can be beaten — forced to play their smallest card instead.`);
     return [weakest];
   }
@@ -724,16 +784,27 @@ class Game {
     const trickCards = r.currentTrick.flatMap(p => p.cards);
     const pts = totalPoints(trickCards);
     r.capturedCards.push(...trickCards);
-    if (r.teams[winner.playerId] === 'B') {
+    if (r.pendingFriendReveal) {
+      // identities aren't settled yet: a still-provisional-B winner's points accrue to them
+      // individually (combined into the shared total once all friends are revealed); a
+      // confirmed-A winner's points are simply discarded, same as always for the defending side
+      if (r.teams[winner.playerId] === 'B') {
+        r.individualScores[winner.playerId] = (r.individualScores[winner.playerId] || 0) + pts;
+      }
+    } else if (r.teams[winner.playerId] === 'B') {
       r.scoreA += pts; // "scoreA" tracks the challenger (non-declarer) side's captured points, named scoreA for legacy
     }
 
     const winnerName = this.getPlayer(winner.playerId).name;
-    this.addLog(`${winnerName} wins the trick${pts ? ` (+${pts} pts)` : ''}.`);
+    this.addLog(`${winnerName} wins the trick${pts ? ` (+${pts} pts)` : ''}.`, { bold: true });
 
     r.lastTrickWinnerSeat = winner.seat;
     r.leaderSeat = winner.seat;
     r.turnSeat = winner.seat;
+    // keep a snapshot of the just-finished trick for display purposes -- currentTrick itself
+    // has to go back to empty so the next lead is correctly detected as a lead (see playCards()),
+    // but the cards should visibly stay on the table until the new leader actually plays
+    r.lastTrick = r.currentTrick;
     r.currentTrick = [];
     r.trickCount += 1;
 
@@ -745,6 +816,10 @@ class Game {
 
   finishRound(lastTrickWinnerPlay) {
     const r = this.round;
+    // safety net: every friend-called card is guaranteed to be played by round end (the
+    // declarer can never hold or bury one), so teams should already be finalized here — but
+    // reconcile defensively in case any individual points were somehow never combined
+    if (r.pendingFriendReveal) this.finalizeTeams();
     const winnerTeam = r.teams[lastTrickWinnerPlay.playerId];
     const kittyPts = totalPoints(r.kitty);
     // the multiplier doubles per card in the final trick's combo: single->2x, pair->4x, triple->8x, quadruple->16x
@@ -771,16 +846,19 @@ class Game {
       this.demoteLevel(r.declarerId);
     } else {
       // defenders successfully held: declarer and friends all level up together
-      const levelUp = Math.max(1, Math.ceil((threshold - challengerScore) / (threshold / 4)));
+      const levelUp = Math.max(1, Math.ceil((threshold - challengerScore) / (threshold / 2)));
       result = { winningSide: 'defenders', levelUp, challengerScore, threshold };
       for (const p of this.players) {
         if (r.teams[p.id] === 'A') this.advanceLevel(p.id, levelUp);
       }
+      this.advanceLevel(r.declarerId)
       // defenders keep defending: dealer seat advances to declarer again (stays same declarer team lead)
     }
     r.roundResult = result;
     this.phase = 'scoring';
-    this.addLog(`Round over. Challengers scored ${challengerScore} (needed ${threshold}). ${result.winningSide === 'challengers' ? 'Challengers' : 'Defenders'} level up by ${result.levelUp}.`);
+    this.addLog(`Round over. Challengers scored ${challengerScore} (needed ${threshold}). 
+      ${result.winningSide === 'challengers' ? 'Challengers' : 'Defenders'} level up by ${result.levelUp}.
+      Since ${result.winningSide === 'challengers' ? 'Challengers' : 'Defenders'} won, ${r.declarerId} gets ${result.winningSide === 'challengers' ? '-1' : '+1'}`);
 
     // rotate dealer seat to the next player for next round
     this.dealerSeat = this.nextSeat(this.dealerSeat);
@@ -789,16 +867,11 @@ class Game {
   advanceLevel(playerId, amount) {
     const order = RANKS;
     const player = this.getPlayer(playerId);
-    // any below-'2' debt gets paid off first; only leftover amount actually advances the rank
     if (player.levelDebt > 0) {
       const payoff = Math.min(amount, player.levelDebt);
       player.levelDebt -= payoff;
       amount -= payoff;
     }
-    // spend what's left one step at a time: each step either pays down an active checkpoint
-    // requirement at the CURRENT rank (5/10/K/A, if that checkpoint's extra-wins setting is >0),
-    // showing as "5+1", "5+2", ... or — once that requirement is fully paid off — advances one
-    // rank. This means a big multi-level win can't leapfrog over an unfinished checkpoint.
     for (let i = 0; i < amount; i++) {
       const req = this.settings.checkpoints[player.level] || 0;
       if (req > 0 && player.checkpointProgress < req) {
@@ -816,10 +889,10 @@ class Game {
     }
   }
 
+  //handles demotion 
   demoteLevel(playerId) {
     const order = RANKS;
     const player = this.getPlayer(playerId);
-    // mid-checkpoint (e.g. "5+2"): a loss just steps back down the plateau ("5+1"), same rank
     if (player.checkpointProgress > 0) {
       player.checkpointProgress -= 1;
       return;
@@ -829,9 +902,6 @@ class Game {
       player.level = order[idx];
       return;
     }
-    // already at the floor rank ('2'): with negative scores on, fall into debt (2-1, 2-2, …)
-    // instead of clamping. The level string stays '2' the whole time, so trump/level-rank
-    // dealing is unaffected — only advanceLevel()'s debt payoff differs.
     if (this.settings.negativeScores) {
       player.levelDebt += 1;
     }
@@ -842,10 +912,7 @@ class Game {
   }
 }
 
-// Groups all trump cards together (jokers + every suit's level-rank card + the trump suit
-// itself, once it's chosen) ahead of the three plain suits, each kept contiguous. Before trump
-// is known (trumpSuit === null), suitGroup()/cardStrength() still correctly group jokers and
-// level-rank cards as trump — only the "+ trump suit" part hasn't kicked in yet.
+// Sorts hand 
 function sortHand(hand, trumpSuit, levelRank) {
   const suitOrder = { S: 0, H: 1, D: 2, C: 3 };
   hand.sort((a, b) => {
@@ -862,8 +929,9 @@ function sortHand(hand, trumpSuit, levelRank) {
 }
 
 module.exports = {
-  Game, friendsNeeded, BID_WINDOW_MS, FRIEND_CALL_WINDOW_MS, KITTY_WINDOW_MS,
+  Game, friendsNeeded, FRIEND_CALL_WINDOW_MS, KITTY_WINDOW_MS,
   BID_TIEBREAK_WINDOW_MS, TRUMP_SELECT_WINDOW_MS,
   MIN_BID_POINTS, MAX_BID_POINTS, BID_POINTS_STEP, DEFAULT_BID_POINTS,
   CHECKPOINT_RANKS, MAX_CHECKPOINT_EXTRA,
+  BID_TIMER_OPTIONS_MS, DEFAULT_BID_TIMER_MS,
 };

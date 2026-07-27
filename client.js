@@ -9,7 +9,8 @@ const BID_POINTS_STEP = 5;
 const CHECKPOINT_RANKS = ['5', '10', 'K', 'A'];
 const MAX_CHECKPOINT_EXTRA = 5;
 const DEFENDER_ICON = '🛡️';
-const CHALLENGER_ICON = '🔱';
+const CHALLENGER_ICON = '⚔️';
+const JOKER_ICON = '🎭';
 
 let myId = null;
 let state = null;
@@ -17,7 +18,33 @@ let selected = new Set(); // selected card ids in hand
 let friendPicks = []; // for friend-call UI local state
 let bidSliderValue = null; // locally-held, not-yet-submitted bid value while the slider is being adjusted
 
-socket.on('connect', () => { myId = socket.id; });
+// A refresh or brief network drop gets a brand-new socket connection, so we remember which
+// table + name we were using and silently rejoin under that name — the server reconnects us
+// to our original seat/hand as long as we're still marked disconnected there.
+const SESSION_KEY = 'tractor_session';
+function saveSession(name, roomCode) {
+  try { localStorage.setItem(SESSION_KEY, JSON.stringify({ name, roomCode })); } catch (e) { /* ignore */ }
+}
+function loadSession() {
+  try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch (e) { return null; }
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) { /* ignore */ }
+}
+
+socket.on('connect', () => {
+  const session = loadSession();
+  if (!session || !session.name || !session.roomCode) return;
+  socket.emit('joinRoom', { name: session.name, roomCode: session.roomCode }, (res) => {
+    if (!res.ok) {
+      clearSession();
+      showConnectError(res.error || 'Could not reconnect automatically — please rejoin.');
+      return;
+    }
+    myId = res.playerId;
+    showScreen('screen-lobby');
+  });
+});
 
 // ---------------- screen helpers ----------------
 function showScreen(id) {
@@ -42,6 +69,8 @@ document.getElementById('btn-create').addEventListener('click', () => {
   const name = document.getElementById('input-name').value.trim() || 'Player';
   socket.emit('createRoom', { name }, (res) => {
     if (!res.ok) return showConnectError(res.error || 'Could not create table');
+    myId = res.playerId;
+    saveSession(name, res.roomCode);
     showScreen('screen-lobby');
   });
 });
@@ -52,6 +81,8 @@ document.getElementById('btn-join').addEventListener('click', () => {
   if (code.length !== 4) return showConnectError('Enter the 4-letter table code');
   socket.emit('joinRoom', { name, roomCode: code }, (res) => {
     if (!res.ok) return showConnectError(res.error || 'Could not join table');
+    myId = res.playerId;
+    saveSession(name, code);
     showScreen('screen-lobby');
   });
 });
@@ -66,6 +97,10 @@ document.getElementById('setting-negative-scores').addEventListener('change', (e
 
 document.getElementById('setting-loser-skips-bidding').addEventListener('change', (e) => {
   socket.emit('updateSettings', { loserSkipsBidding: e.target.checked });
+});
+
+document.getElementById('setting-bid-timer').addEventListener('change', (e) => {
+  socket.emit('updateSettings', { bidTimerMs: parseInt(e.target.value, 10) });
 });
 
 buildCheckpointRows();
@@ -116,6 +151,13 @@ function flashError(msg) {
   el._t = setTimeout(() => { el.style.opacity = '0'; }, 3200);
 }
 
+socket.on('kicked', () => {
+  state = null;
+  clearSession();
+  showScreen('screen-connect');
+  showConnectError('The host removed you from the table.');
+});
+
 // ---------------- state handling ----------------
 socket.on('state', (s) => {
   state = s;
@@ -140,16 +182,25 @@ function render() {
 
 function renderLobby() {
   document.getElementById('lobby-code').textContent = state.roomCode;
+  const isHost = myId === state.hostId;
   const list = document.getElementById('lobby-players');
   list.innerHTML = '';
   state.players.forEach((p, i) => {
     const li = document.createElement('li');
     if (!p.connected) li.classList.add('offline');
     li.innerHTML = `<span><span class="seat-num">${i + 1}.</span>${escapeHtml(p.name)}${p.id === myId ? ' (you)' : ''}</span>
-      <span class="tag">${p.id === state.hostId ? 'HOST' : (p.connected ? 'READY' : 'OFFLINE')}</span>`;
+      <span class="player-row-right"><span class="tag">${p.id === state.hostId ? 'HOST' : (p.connected ? 'READY' : 'OFFLINE')}</span></span>`;
+    if (isHost && p.id !== myId) {
+      const kickBtn = document.createElement('button');
+      kickBtn.className = 'btn btn-ghost tiny';
+      kickBtn.textContent = 'Kick';
+      kickBtn.onclick = () => {
+        if (confirm(`Remove ${p.name} from the table?`)) socket.emit('kickPlayer', { playerId: p.id });
+      };
+      li.querySelector('.player-row-right').appendChild(kickBtn);
+    }
     list.appendChild(li);
   });
-  const isHost = myId === state.hostId;
   const negScoresBox = document.getElementById('setting-negative-scores');
   negScoresBox.checked = !!(state.settings && state.settings.negativeScores);
   negScoresBox.disabled = !isHost;
@@ -164,6 +215,10 @@ function renderLobby() {
   const loserBox = document.getElementById('setting-loser-skips-bidding');
   loserBox.checked = !!(state.settings && state.settings.loserSkipsBidding);
   loserBox.disabled = !isHost;
+
+  const bidTimerSelect = document.getElementById('setting-bid-timer');
+  bidTimerSelect.value = String((state.settings && state.settings.bidTimerMs) ?? 30000);
+  bidTimerSelect.disabled = !isHost;
 
   const n = state.players.length;
   const btn = document.getElementById('btn-start');
@@ -207,12 +262,13 @@ function phaseLabel(p) {
 function renderLog() {
   const list = document.getElementById('log-list');
   list.innerHTML = '';
-  (state.log || []).slice().reverse().forEach(entry => {
+  (state.log || []).forEach(entry => {
     const div = document.createElement('div');
-    div.className = 'entry';
+    div.className = 'entry' + (entry.bold ? ' bold' : '');
     div.textContent = entry.msg;
     list.appendChild(div);
   });
+  list.scrollTop = list.scrollHeight;
 }
 
 function renderSeats() {
@@ -235,15 +291,21 @@ function renderSeats() {
     let meta = `Seat ${p.seat + 1} · Lvl ${formatLevel(p)}`;
     if (r) {
       if (p.id === r.declarerId) meta += ' · Declarer';
-      if (r.teams && r.teams[p.id]) meta += r.teams[p.id] === 'A' ? ` · ${DEFENDER_ICON} Def. side` : ` · ${CHALLENGER_ICON} Chal. side`;
+      if (r.teams && r.teams[p.id]) meta += r.teams[p.id] === 'A' ? ' · Def. side' : ' · Chal. side';
       if (r.handCounts && r.handCounts[p.id] !== undefined && state.phase === 'playing') meta += ` · ${r.handCounts[p.id]} cards`;
     }
     if (!p.connected) meta += ' · offline';
 
-    tag.innerHTML = `<div class="seat-name">${escapeHtml(p.name)}${p.id === myId ? ' (you)' : ''}</div><div class="seat-meta">${meta}</div>`;
+    const teamIcon = (r && r.teams && r.teams[p.id])
+      ? `<span class="team-icon">${r.teams[p.id] === 'A' ? DEFENDER_ICON : CHALLENGER_ICON}</span>`
+      : '';
+    tag.innerHTML = `<div class="seat-name">${teamIcon}${escapeHtml(p.name)}${p.id === myId ? ' (you)' : ''}</div><div class="seat-meta">${meta}</div>`;
 
-    if (r && state.phase === 'playing' && r.currentTrick) {
-      const play = r.currentTrick.find(pl => pl.seat === p.seat);
+    if (r && state.phase === 'playing') {
+      // once a trick resolves, its cards stay visible (from lastTrick) until the next trick's
+      // leader actually plays -- at that point currentTrick has entries again and takes over
+      const trickToShow = (r.currentTrick && r.currentTrick.length > 0) ? r.currentTrick : r.lastTrick;
+      const play = trickToShow && trickToShow.find(pl => pl.seat === p.seat);
       if (play) {
         const cardsDiv = document.createElement('div');
         cardsDiv.className = 'trick-cards';
@@ -277,16 +339,26 @@ function panel(html) {
   return div;
 }
 
-function renderBiddingCenter(r) {
+function biddingCountdownText(r) {
+  if (!r.bidDeadline) return `${r.bidProgress.acted} / ${r.bidProgress.total} players have bid · no time limit`;
   const secsLeft = Math.max(0, Math.round((r.bidDeadline - Date.now()) / 1000));
-  const pct = Math.max(0, Math.min(100, (secsLeft / 20) * 100));
+  return `${r.bidProgress.acted} / ${r.bidProgress.total} players have bid · ${secsLeft}s left`;
+}
 
+function biddingCountdownPct(r) {
+  const totalMs = state.settings && state.settings.bidTimerMs;
+  if (!r.bidDeadline || !totalMs) return 100;
+  const secsLeft = Math.max(0, Math.round((r.bidDeadline - Date.now()) / 1000));
+  return Math.max(0, Math.min(100, (secsLeft / (totalMs / 1000)) * 100));
+}
+
+function renderBiddingCenter(r) {
   if (r.blockedBidderId === myId) {
     return panel(`
       <h3>Bidding</h3>
       <p class="bid-status">You're alone in last place and sitting out this round's bidding — you'll be able to bid again next round.</p>
-      <p id="bid-countdown">${r.bidProgress.acted} / ${r.bidProgress.total} players have bid · ${secsLeft}s left</p>
-      <div class="timer-bar"><div class="timer-fill" id="bid-timer-fill" style="width:${pct}%"></div></div>
+      <p id="bid-countdown">${biddingCountdownText(r)}</p>
+      <div class="timer-bar"><div class="timer-fill" id="bid-timer-fill" style="width:${biddingCountdownPct(r)}%"></div></div>
     `);
   }
 
@@ -311,8 +383,8 @@ function renderBiddingCenter(r) {
       <button id="btn-pass-bid" class="btn btn-ghost">Pass</button>
     </div>
     <p class="bid-status">${statusLine}</p>
-    <p id="bid-countdown">${r.bidProgress.acted} / ${r.bidProgress.total} players have bid · ${secsLeft}s left</p>
-    <div class="timer-bar"><div class="timer-fill" id="bid-timer-fill" style="width:${pct}%"></div></div>
+    <p id="bid-countdown">${biddingCountdownText(r)}</p>
+    <div class="timer-bar"><div class="timer-fill" id="bid-timer-fill" style="width:${biddingCountdownPct(r)}%"></div></div>
   `);
   setTimeout(() => wireBidSlider(), 0);
   return p;
@@ -334,9 +406,14 @@ function wireBidSlider() {
   };
 }
 
-function renderBidTiebreakCenter(r) {
+function bidTiebreakCountdownText(r) {
   const tb = r.bidTiebreak;
   const secsLeft = Math.max(0, Math.round((tb.deadline - Date.now()) / 1000));
+  return `${tb.answered.length} / ${tb.contenders.length} have answered · ${secsLeft}s left`;
+}
+
+function renderBidTiebreakCenter(r) {
+  const tb = r.bidTiebreak;
   const names = tb.contenders.map(playerName).join(' and ');
   const amIContender = tb.contenders.includes(myId);
   const iAnswered = tb.answered.includes(myId);
@@ -360,7 +437,7 @@ function renderBidTiebreakCenter(r) {
     <h3>Bid runoff</h3>
     <p>${names} tied at <b>${tb.tiedValue}</b> points. Whoever will still play for <b>${tb.value}</b> wins the bid there; if everyone declines, it's a coin flip at ${tb.tiedValue}.</p>
     ${actionHtml}
-    <p>${tb.answered.length} / ${tb.contenders.length} have answered · ${secsLeft}s left</p>
+    <p id="bidtiebreak-countdown">${bidTiebreakCountdownText(r)}</p>
   `);
   if (amIContender && !iAnswered) {
     setTimeout(() => {
@@ -371,17 +448,21 @@ function renderBidTiebreakCenter(r) {
   return p;
 }
 
-function renderTrumpSelectCenter(r) {
+function trumpSelectCountdownText(r) {
   const secsLeft = Math.max(0, Math.round((r.trumpSelectDeadline - Date.now()) / 1000));
+  return `${secsLeft}s left`;
+}
+
+function renderTrumpSelectCenter(r) {
   const isDeclarer = myId === r.declarerId;
   if (!isDeclarer) {
-    return panel(`<h3>Choosing trump</h3><p>${playerName(r.declarerId)} won the bid at <b>${r.bidPoints}</b> points and is choosing trump.</p><p>${secsLeft}s left</p>`);
+    return panel(`<h3>Choosing trump</h3><p>${playerName(r.declarerId)} won the bid at <b>${r.bidPoints}</b> points and is choosing trump.</p><p id="trumpselect-countdown">${trumpSelectCountdownText(r)}</p>`);
   }
   const p = panel(`
     <h3>Choose trump</h3>
     <p>You won the bid at <b>${r.bidPoints}</b> points. Pick the trump suit (or no-trump).</p>
     <div class="bid-slider-actions" id="trump-choices"></div>
-    <p>${secsLeft}s left</p>
+    <p id="trumpselect-countdown">${trumpSelectCountdownText(r)}</p>
   `);
   setTimeout(() => {
     const container = document.getElementById('trump-choices');
@@ -558,7 +639,7 @@ function cardEl(card, opts = {}) {
   if (card.suit === 'JOKER') {
     div.classList.add('joker');
     if (card.rank === 'BIG') div.classList.add('big');
-    div.innerHTML = `<div class="rank">${card.rank === 'BIG' ? 'BIG' : 'small'}</div><div class="suit">JOKER</div>`;
+    div.innerHTML = `<div class="rank">${card.rank === 'BIG' ? 'B' : 'S'}</div><div class="suit">${JOKER_ICON}</div>`;
   } else {
     if (RED_SUITS.has(card.suit)) div.classList.add('red');
     div.innerHTML = `<div class="rank">${card.rank}</div><div class="suit">${SUIT_SYMBOL[card.suit]}</div>`;
@@ -595,23 +676,32 @@ function escapeHtml(s) {
   return (s || '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
 
-// periodic re-render for countdown timers
+// periodic in-place countdown updates -- these deliberately never call renderCenter()/innerHTML
+// during a live phase, since rebuilding the DOM every second would tear down and recreate any
+// interactive controls (dropdowns, buttons) underneath the player's cursor, resetting selections
+// and making things hard to click ("the screen jumps")
 function tickBiddingCountdown(r) {
-  const secsLeft = Math.max(0, Math.round((r.bidDeadline - Date.now()) / 1000));
-  const pct = Math.max(0, Math.min(100, (secsLeft / 20) * 100));
   const countdownEl = document.getElementById('bid-countdown');
   const fillEl = document.getElementById('bid-timer-fill');
-  if (countdownEl) countdownEl.textContent = `${r.bidProgress.acted} / ${r.bidProgress.total} players have bid · ${secsLeft}s left`;
-  if (fillEl) fillEl.style.width = pct + '%';
+  if (countdownEl) countdownEl.textContent = biddingCountdownText(r);
+  if (fillEl) fillEl.style.width = biddingCountdownPct(r) + '%';
+}
+function tickTrumpSelectCountdown(r) {
+  const el = document.getElementById('trumpselect-countdown');
+  if (el) el.textContent = trumpSelectCountdownText(r);
+}
+function tickBidTiebreakCountdown(r) {
+  const el = document.getElementById('bidtiebreak-countdown');
+  if (el) el.textContent = bidTiebreakCountdownText(r);
 }
 
-const TIMED_PHASES = new Set(['bidtiebreak', 'trumpselect', 'friendcall']);
 setInterval(() => {
-  if (!state) return;
-  // bidding gets an in-place countdown update so it doesn't yank the slider out from
-  // under an in-progress drag; the other timed phases have no live input to disrupt
-  if (state.phase === 'bidding' && state.round) tickBiddingCountdown(state.round);
-  else if (TIMED_PHASES.has(state.phase)) renderCenter();
+  if (!state || !state.round) return;
+  if (state.phase === 'bidding') tickBiddingCountdown(state.round);
+  else if (state.phase === 'trumpselect') tickTrumpSelectCountdown(state.round);
+  else if (state.phase === 'bidtiebreak' && state.round.bidTiebreak) tickBidTiebreakCountdown(state.round);
+  // friendcall shows no live countdown, so there's nothing to tick -- the friend-picker's
+  // dropdowns just sit undisturbed until the declarer submits or the state actually changes
 }, 1000);
 
 showScreen('screen-connect');

@@ -10,6 +10,15 @@ function suitName(s) {
   return { S: 'Spades', H: 'Hearts', D: 'Diamonds', C: 'Clubs', JOKER: 'Joker' }[s];
 }
 
+const SUIT_SYMBOL = { S: '♠', H: '♥', D: '♦', C: '♣' };
+
+// Human-readable label for a card, using the actual suit symbol rather than its letter
+// (e.g. "A♠" instead of "AS"), for log messages and other display text.
+function cardLabel(card) {
+  if (card.suit === 'JOKER') return card.rank === 'BIG' ? 'Big Joker' : 'Small Joker';
+  return `${card.rank}${SUIT_SYMBOL[card.suit]}`;
+}
+
 // Build N decks of 54 cards each, tagged with a unique id.
 function buildShoe(numDecks) {
   const cards = [];
@@ -158,6 +167,8 @@ function totalPoints(cards) {
 module.exports = {
   SUITS, RANKS, RANK_INDEX,
   suitName,
+  SUIT_SYMBOL,
+  cardLabel,
   buildShoe,
   shuffle,
   computeDealPlan,

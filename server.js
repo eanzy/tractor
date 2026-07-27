@@ -12,6 +12,9 @@ app.use(express.static(path.join(__dirname)));
 
 const rooms = new Map(); // roomCode -> Game
 const socketRoom = new Map(); // socket.id -> roomCode
+// a reconnect (refresh, network drop) gets a brand-new socket.id, so the STABLE player id
+// (assigned once, on first join) is tracked separately from whichever socket is currently live
+const socketPlayerId = new Map(); // socket.id -> stable player id
 
 function makeRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -79,7 +82,8 @@ io.on('connection', (socket) => {
     game.addPlayer(socket.id, name || 'Player');
     socket.join(code);
     socketRoom.set(socket.id, code);
-    cb && cb({ ok: true, roomCode: code });
+    socketPlayerId.set(socket.id, socket.id);
+    cb && cb({ ok: true, roomCode: code, playerId: socket.id });
     emitState(game);
   });
 
@@ -87,17 +91,33 @@ io.on('connection', (socket) => {
     const code = (roomCode || '').toUpperCase().trim();
     const game = rooms.get(code);
     if (!game) return cb && cb({ ok: false, error: 'Room not found' });
-    if (game.players.length >= 8 && !game.getPlayer(socket.id)) {
+    const cleanName = (name || 'Player').trim() || 'Player';
+
+    // a disconnected player with the same name reclaims their original seat/hand/level under
+    // their existing stable id, instead of being added as a brand-new player
+    const existing = game.findDisconnectedByName(cleanName);
+    if (existing) {
+      game.reconnectPlayer(existing.id);
+      socket.join(code);
+      socketRoom.set(socket.id, code);
+      socketPlayerId.set(socket.id, existing.id);
+      cb && cb({ ok: true, roomCode: code, playerId: existing.id });
+      emitState(game);
+      return;
+    }
+
+    if (game.players.length >= 8) {
       return cb && cb({ ok: false, error: 'Room is full' });
     }
     try {
-      game.addPlayer(socket.id, name || 'Player');
+      game.addPlayer(socket.id, cleanName);
     } catch (e) {
       return cb && cb({ ok: false, error: e.message });
     }
     socket.join(code);
     socketRoom.set(socket.id, code);
-    cb && cb({ ok: true, roomCode: code });
+    socketPlayerId.set(socket.id, socket.id);
+    cb && cb({ ok: true, roomCode: code, playerId: socket.id });
     emitState(game);
   });
 
@@ -105,42 +125,59 @@ io.on('connection', (socket) => {
     const code = socketRoom.get(socket.id);
     const game = rooms.get(code);
     if (!game) return emitError(socket, 'Not in a room');
+    const playerId = socketPlayerId.get(socket.id) || socket.id;
     try {
-      cb(game);
+      cb(game, playerId);
       emitState(game);
     } catch (e) {
       emitError(socket, e.message);
     }
   }
 
-  socket.on('startRound', () => withGame((game) => {
-    if (socket.id !== game.hostId) throw new Error('Only the host can start the round');
+  socket.on('startRound', () => withGame((game, playerId) => {
+    if (playerId !== game.hostId) throw new Error('Only the host can start the round');
     if (game.players.filter(p => p.connected).length !== game.players.length) throw new Error('Waiting for all players to be connected');
     game.startRound();
   }));
 
-  socket.on('updateSettings', (patch) => withGame((game) => game.updateSettings(socket.id, patch)));
+  socket.on('updateSettings', (patch) => withGame((game, playerId) => game.updateSettings(playerId, patch)));
 
-  socket.on('placeBid', ({ points }) => withGame((game) => game.placeBid(socket.id, points)));
-  socket.on('passBid', () => withGame((game) => game.passBid(socket.id)));
-  socket.on('answerTiebreak', ({ accept }) => withGame((game) => game.answerTiebreak(socket.id, accept)));
-  socket.on('chooseTrump', ({ suit }) => withGame((game) => game.chooseTrump(socket.id, suit)));
-  socket.on('buryKitty', ({ cardIds }) => withGame((game) => game.buryKitty(socket.id, cardIds)));
-  socket.on('callFriends', ({ calls }) => withGame((game) => game.callFriends(socket.id, calls)));
-  socket.on('playCards', ({ cardIds }) => withGame((game) => game.playCards(socket.id, cardIds)));
-  socket.on('nextRound', () => withGame((game) => {
-    if (socket.id !== game.hostId) throw new Error('Only the host can start the next round');
+  socket.on('kickPlayer', ({ playerId: targetId }) => withGame((game, playerId) => {
+    const removedId = game.kickPlayer(playerId, targetId);
+    for (const [sid, pid] of socketPlayerId.entries()) {
+      if (pid !== removedId) continue;
+      const kickedSocket = io.sockets.sockets.get(sid);
+      if (kickedSocket) {
+        kickedSocket.emit('kicked');
+        kickedSocket.leave(socketRoom.get(sid));
+      }
+      socketRoom.delete(sid);
+      socketPlayerId.delete(sid);
+    }
+  }));
+
+  socket.on('placeBid', ({ points }) => withGame((game, playerId) => game.placeBid(playerId, points)));
+  socket.on('passBid', () => withGame((game, playerId) => game.passBid(playerId)));
+  socket.on('answerTiebreak', ({ accept }) => withGame((game, playerId) => game.answerTiebreak(playerId, accept)));
+  socket.on('chooseTrump', ({ suit }) => withGame((game, playerId) => game.chooseTrump(playerId, suit)));
+  socket.on('buryKitty', ({ cardIds }) => withGame((game, playerId) => game.buryKitty(playerId, cardIds)));
+  socket.on('callFriends', ({ calls }) => withGame((game, playerId) => game.callFriends(playerId, calls)));
+  socket.on('playCards', ({ cardIds }) => withGame((game, playerId) => game.playCards(playerId, cardIds)));
+  socket.on('nextRound', () => withGame((game, playerId) => {
+    if (playerId !== game.hostId) throw new Error('Only the host can start the next round');
     game.startRound();
   }));
 
   socket.on('disconnect', () => {
     const code = socketRoom.get(socket.id);
     const game = rooms.get(code);
-    if (game) {
-      game.removePlayer(socket.id);
+    const playerId = socketPlayerId.get(socket.id);
+    if (game && playerId) {
+      game.removePlayer(playerId);
       emitState(game);
     }
     socketRoom.delete(socket.id);
+    socketPlayerId.delete(socket.id);
   });
 });
 
