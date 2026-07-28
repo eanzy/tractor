@@ -190,8 +190,6 @@ class Game {
       bidPoints: r.bidPoints,
       declarerId: r.declarerId,
       dealerSeat: r.dealerSeat,
-      // bids stay sealed while phase === 'bidding'; once bidding closes (tie-break, trump
-      // selection, or later) they're revealed to everyone
       bids: this.phase === 'bidding' ? undefined : r.bids,
       myBid: me ? (r.bids[me.id] ?? null) : null,
       myPassed: me ? r.bidPasses.has(me.id) : false,
@@ -251,17 +249,13 @@ class Game {
     }
     const kittyCards = shoe.slice(idx, idx + kitty);
 
-    // the dealer is known before bidding starts (unlike the declarer), so their own personal
-    // level sets this round's level rank
-    const dealer = this.players.find(p => p.seat === this.dealerSeat) || this.players[0];
-    const levelRank = dealer.level;
-
-    // sort each hand for display convenience: trump suit isn't known yet, but jokers and
-    // level-rank cards already group together as trump ahead of the three plain suits
-    for (const p of this.players) sortHand(hands[p.id], null, levelRank);
+    // the level rank is the DECLARER's own level, but the declarer isn't known until bidding
+    // resolves -- it gets filled in later (see finalizeDeclarer() / resolveBidding()'s no-bid
+    // fallback), once we actually know who that is
+    for (const p of this.players) sortHand(hands[p.id], null, null);
     this.round = {
       numDecks, perPlayer, kittySize: kitty,
-      levelRank,
+      levelRank: null,
       trumpSuit: null,
       bidPoints: null,
       declarerId: null,
@@ -298,7 +292,7 @@ class Game {
       finalKittyForDisplay: null,
     };
     this.phase = 'bidding';
-    this.addLog(`New round dealt: ${numDecks} decks, ${perPlayer} cards each, ${kitty}-card kitty. Level rank is ${levelRank}.`);
+    this.addLog(`New round dealt: ${numDecks} decks, ${perPlayer} cards each, ${kitty}-card kitty.`);
 
     const blockedId = this.determineLoserBidBlock();
     if (blockedId) {
@@ -359,7 +353,8 @@ class Game {
       r.bidPoints = DEFAULT_BID_POINTS;
       const declarer = this.players.find(p => p.seat === r.dealerSeat) || this.players[0];
       r.declarerId = declarer.id;
-      this.addLog(`No one bid. ${declarer.name} is the default declarer, no-trump round. Defenders must hold challengers under ${r.bidPoints}.`);
+      r.levelRank = declarer.level;
+      this.addLog(`No one bid. ${declarer.name} is the default declarer, no-trump round. Level rank is ${r.levelRank}. Defenders must hold challengers under ${r.bidPoints}.`);
       this.resortAllHandsForTrump();
       this.beginKittyPhase();
       return;
@@ -448,11 +443,12 @@ class Game {
     const r = this.round;
     r.declarerId = playerId;
     r.bidPoints = bidPoints;
+    r.levelRank = this.getPlayer(playerId).level;
     r.bidTiebreak = null;
     r.trumpSuit = null;
     r.trumpSelectDeadline = Date.now() + TRUMP_SELECT_WINDOW_MS;
     this.phase = 'trumpselect';
-    this.addLog(`${this.getPlayer(playerId).name} wins the bid at ${bidPoints} points and will choose trump.`);
+    this.addLog(`${this.getPlayer(playerId).name} wins the bid at ${bidPoints} points (level rank ${r.levelRank}) and will choose trump.`);
   }
 
   // ---------------- TRUMP SELECTION (declarer only, after bidding is settled) ----------------

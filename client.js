@@ -239,7 +239,10 @@ function renderLobby() {
 function renderGame() {
   document.getElementById('tb-code').textContent = state.roomCode;
   document.getElementById('tb-phase').textContent = phaseLabel(state.phase);
-  document.getElementById('level-rank').textContent = `Level ${state.round ? state.round.levelRank : (me() ? me().level : '2')}`;
+  const levelRankText = state.round
+    ? (state.round.levelRank !== null ? state.round.levelRank : '?') // not known until the declarer is decided
+    : (me() ? me().level : '2');
+  document.getElementById('level-rank').textContent = `Level ${levelRankText}`;
 
   renderLog();
   renderSeats();
@@ -261,6 +264,10 @@ function phaseLabel(p) {
 
 function renderLog() {
   const list = document.getElementById('log-list');
+  // only snap to the newest entry if the user was already at (or near) the bottom -- otherwise
+  // this rebuild (which happens on every state update, i.e. constantly during play) would yank
+  // them back down the instant they scroll up to read earlier entries
+  const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
   list.innerHTML = '';
   (state.log || []).forEach(entry => {
     const div = document.createElement('div');
@@ -268,7 +275,7 @@ function renderLog() {
     div.textContent = entry.msg;
     list.appendChild(div);
   });
-  list.scrollTop = list.scrollHeight;
+  if (wasAtBottom) list.scrollTop = list.scrollHeight;
 }
 
 function renderSeats() {
