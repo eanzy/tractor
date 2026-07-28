@@ -83,6 +83,15 @@
           </select>
         </label>
         <p class="hint">How long players have to submit a sealed bid before bidding auto-closes. With it off, bidding only ends once everyone has bid or passed.</p>
+
+        <label class="toggle-row">
+          <input type="checkbox" id="setting-fixed-teams" />
+          <span>Set teams (host assigns partners)</span>
+        </label>
+        <p class="hint">Even player counts only. Instead of find-a-friend, you assign fixed partnerships yourself — once confirmed, seats rearrange so partners alternate around the table for the rest of the game.</p>
+        <div class="team-assign-rows" id="team-assign-rows"></div>
+        <button id="btn-confirm-teams" class="btn btn-secondary" style="margin-top:8px;">Confirm teams</button>
+        <p class="hint" id="team-assign-status"></p>
       </div>
 
       <button id="btn-start" class="btn btn-primary" disabled>Waiting for 3+ players…</button>

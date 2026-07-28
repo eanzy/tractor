@@ -103,6 +103,14 @@ document.getElementById('setting-bid-timer').addEventListener('change', (e) => {
   socket.emit('updateSettings', { bidTimerMs: parseInt(e.target.value, 10) });
 });
 
+document.getElementById('setting-fixed-teams').addEventListener('change', (e) => {
+  socket.emit('updateSettings', { fixedTeams: e.target.checked });
+});
+
+document.getElementById('btn-confirm-teams').addEventListener('click', () => {
+  socket.emit('confirmTeams');
+});
+
 buildCheckpointRows();
 function buildCheckpointRows() {
   const container = document.getElementById('checkpoint-rows');
@@ -220,18 +228,74 @@ function renderLobby() {
   bidTimerSelect.value = String((state.settings && state.settings.bidTimerMs) ?? 30000);
   bidTimerSelect.disabled = !isHost;
 
+  const fixedTeamsOn = !!(state.settings && state.settings.fixedTeams);
+  const fixedTeamsBox = document.getElementById('setting-fixed-teams');
+  fixedTeamsBox.checked = fixedTeamsOn;
+  fixedTeamsBox.disabled = !isHost;
+  renderTeamAssignRows(isHost, fixedTeamsOn);
+
   const n = state.players.length;
   const btn = document.getElementById('btn-start');
   const note = document.getElementById('lobby-note');
+  const teamsBlocking = fixedTeamsOn && !state.teamsConfirmed;
   if (n < 3) {
     btn.disabled = true; btn.textContent = `Waiting for players (${n}/3 minimum)`;
     note.textContent = '';
   } else if (n > 8) {
     btn.disabled = true; btn.textContent = 'Too many players (max 8)';
+  } else if (teamsBlocking) {
+    btn.disabled = true; btn.textContent = 'Confirm teams before starting';
+    note.textContent = isHost ? 'Assign every player to Team A or Team B above, then confirm.' : 'Waiting for the host to confirm teams.';
   } else {
     btn.disabled = !isHost;
     btn.textContent = isHost ? `Start round · ${n} players` : `Waiting for host to start (${n} players)`;
     note.textContent = isHost ? '' : 'Only the host can start the round.';
+  }
+}
+
+function renderTeamAssignRows(isHost, fixedTeamsOn) {
+  const container = document.getElementById('team-assign-rows');
+  const confirmBtn = document.getElementById('btn-confirm-teams');
+  const statusEl = document.getElementById('team-assign-status');
+  container.innerHTML = '';
+
+  if (!fixedTeamsOn) {
+    confirmBtn.style.display = 'none';
+    statusEl.textContent = '';
+    return;
+  }
+
+  const n = state.players.length;
+  state.players.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'checkpoint-row';
+    const select = document.createElement('select');
+    select.disabled = !isHost;
+    [['', 'Unassigned'], ['A', 'Team A'], ['B', 'Team B']].forEach(([value, label]) => {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = label;
+      select.appendChild(o);
+    });
+    select.value = p.pendingTeam || '';
+    select.addEventListener('change', () => {
+      socket.emit('assignPlayerTeam', { playerId: p.id, team: select.value || null });
+    });
+    row.innerHTML = `<span>${escapeHtml(p.name)}${p.id === myId ? ' (you)' : ''}</span>`;
+    row.appendChild(select);
+    container.appendChild(row);
+  });
+
+  confirmBtn.style.display = '';
+  confirmBtn.disabled = !isHost;
+
+  if (state.teamsConfirmed) {
+    statusEl.textContent = 'Teams confirmed — seats are locked in for the rest of the game.';
+  } else if (n % 2 !== 0) {
+    statusEl.textContent = `Need an even number of players (currently ${n}).`;
+  } else {
+    const assigned = state.players.filter(p => p.pendingTeam).length;
+    statusEl.textContent = `${assigned} / ${n} players assigned.`;
   }
 }
 

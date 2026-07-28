@@ -186,7 +186,7 @@ body::before{
 .toggle-row input[type="checkbox"]:disabled{ cursor:not-allowed; opacity:.5; }
 .settings-panel .hint{ margin:8px 0 0; }
 
-.checkpoint-rows{ display:flex; flex-direction:column; gap:8px; margin-top:12px; }
+.checkpoint-rows, .team-assign-rows{ display:flex; flex-direction:column; gap:8px; margin-top:12px; }
 .checkpoint-row{
   display:flex; align-items:center; justify-content:space-between;
   font-size:14px; font-weight:600; cursor:pointer;

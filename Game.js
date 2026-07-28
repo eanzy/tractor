@@ -47,7 +47,10 @@ class Game {
       checkpoints: { '5': 0, '10': 0, 'K': 0, 'A': 0 },
       loserSkipsBidding: false, // see determineLoserBidBlock()
       bidTimerMs: DEFAULT_BID_TIMER_MS, // 0 = no timer, else one of BID_TIMER_OPTIONS_MS
+      fixedTeams: false, // even player counts only -- host-assigned, persistent partnerships
+      // instead of find-a-friend; see assignPlayerTeam()/confirmTeams()
     };
+    this.teamsConfirmed = false;
 
     this.round = null; // transient round state, see resetRoundState()
     this.log = [];
@@ -57,8 +60,12 @@ class Game {
     if (this.players.find(p => p.id === id)) return;
     if (this.players.length >= 8) throw new Error('Room is full (max 8 players)');
     const seat = this.players.length;
-    this.players.push({ id, name, seat, connected: true, level: '2', levelDebt: 0, checkpointProgress: 0, loserStreak: 0 });
+    this.players.push({
+      id, name, seat, connected: true, level: '2', levelDebt: 0, checkpointProgress: 0, loserStreak: 0,
+      pendingTeam: null, fixedTeam: null,
+    });
     if (!this.hostId) this.hostId = id;
+    this.resetTeamAssignments(); // the roster changed -- any prior assignment/confirmation is stale
   }
 
   updateSettings(playerId, patch) {
@@ -66,6 +73,10 @@ class Game {
     if (this.phase !== 'lobby') throw new Error('Settings can only be changed before the game starts');
     if (typeof patch.negativeScores === 'boolean') this.settings.negativeScores = patch.negativeScores;
     if (typeof patch.loserSkipsBidding === 'boolean') this.settings.loserSkipsBidding = patch.loserSkipsBidding;
+    if (typeof patch.fixedTeams === 'boolean') {
+      this.settings.fixedTeams = patch.fixedTeams;
+      this.resetTeamAssignments(); // start fresh every time the mode is toggled either way
+    }
     if (patch.bidTimerMs !== undefined) {
       if (!BID_TIMER_OPTIONS_MS.includes(patch.bidTimerMs)) {
         throw new Error(`Bid timer must be one of: ${BID_TIMER_OPTIONS_MS.join(', ')} ms`);
@@ -154,8 +165,61 @@ class Game {
     if (idx === -1) throw new Error('Player not found');
     const [kicked] = this.players.splice(idx, 1);
     this.players.forEach((p, i) => { p.seat = i; });
+    this.resetTeamAssignments(); // the roster changed -- any prior assignment/confirmation is stale
     this.addLog(`${kicked.name} was removed from the table by the host.`);
     return kicked.id;
+  }
+
+  // ---------------- FIXED TEAMS (even player counts, host-assigned, persistent partnerships) --
+
+  resetTeamAssignments() {
+    this.teamsConfirmed = false;
+    for (const p of this.players) p.pendingTeam = null;
+  }
+
+  assignPlayerTeam(hostId, targetId, team) {
+    if (hostId !== this.hostId) throw new Error('Only the host can assign teams');
+    if (this.phase !== 'lobby') throw new Error('Teams can only be assigned before the game starts');
+    if (!this.settings.fixedTeams) throw new Error('Turn on the "set teams" option first');
+    if (team !== 'A' && team !== 'B' && team !== null) throw new Error('Team must be A, B, or null');
+    const target = this.getPlayer(targetId);
+    if (!target) throw new Error('Player not found');
+    target.pendingTeam = team;
+    this.teamsConfirmed = false; // any change invalidates a previous confirmation
+  }
+
+  confirmTeams(hostId) {
+    if (hostId !== this.hostId) throw new Error('Only the host can confirm teams');
+    if (this.phase !== 'lobby') throw new Error('Teams can only be confirmed before the game starts');
+    if (!this.settings.fixedTeams) throw new Error('Turn on the "set teams" option first');
+    const n = this.players.length;
+    if (n % 2 !== 0) throw new Error('Fixed teams need an even number of players');
+    const teamA = this.players.filter(p => p.pendingTeam === 'A');
+    const teamB = this.players.filter(p => p.pendingTeam === 'B');
+    if (teamA.length + teamB.length !== n) throw new Error('Every player must be assigned to a team');
+    if (teamA.length !== teamB.length) throw new Error('Both teams must have the same number of players');
+
+    for (const p of this.players) p.fixedTeam = p.pendingTeam;
+    // re-seat so partners alternate around the table (A, B, A, B, ...)
+    const interleaved = [];
+    for (let i = 0; i < teamA.length; i++) {
+      interleaved.push(teamA[i]);
+      interleaved.push(teamB[i]);
+    }
+    interleaved.forEach((p, i) => { p.seat = i; });
+    this.players.sort((a, b) => a.seat - b.seat);
+    this.teamsConfirmed = true;
+    this.addLog('Teams confirmed — seats rearranged so partners alternate around the table.');
+  }
+
+  assignConfirmedFixedTeams() {
+    const r = this.round;
+    r.teams = {};
+    const declarerFixedTeam = this.getPlayer(r.declarerId).fixedTeam;
+    for (const p of this.players) {
+      r.teams[p.id] = (p.fixedTeam === declarerFixedTeam) ? 'A' : 'B';
+    }
+    r.pendingFriendReveal = false; // teams are fixed and already known, nothing to reveal
   }
 
   getPlayer(id) {
@@ -171,9 +235,11 @@ class Game {
       players: this.players.map(p => ({
         id: p.id, name: p.name, seat: p.seat, connected: p.connected,
         level: p.level, levelDebt: p.levelDebt, checkpointProgress: p.checkpointProgress, loserStreak: p.loserStreak,
+        pendingTeam: p.pendingTeam, fixedTeam: p.fixedTeam,
       })),
       gameWonBy: this.gameWonBy,
       settings: this.settings,
+      teamsConfirmed: this.teamsConfirmed,
       // generous cap: a full round's play-by-play (every card played, every trick winner) can
       // easily run several hundred lines with a large hand, so 40 would truncate mid-round
       log: this.log.slice(-1000),
@@ -236,6 +302,7 @@ class Game {
   startRound() {
     const numPlayers = this.players.length;
     if (numPlayers < 3 || numPlayers > 8) throw new Error('Need 3-8 players');
+    if (this.settings.fixedTeams && !this.teamsConfirmed) throw new Error('Confirm teams before starting the round');
     const { numDecks, perPlayer, kitty } = computeDealPlan(numPlayers);
     const shoe = shuffle(buildShoe(numDecks));
 
@@ -271,7 +338,8 @@ class Game {
       trumpSelectDeadline: null,
       kittyDeadline: null,
       friendCallDeadline: null,
-      friendsNeeded: friendsNeeded(numPlayers),
+      // fixed teams are already known -- no friend-calling needed regardless of player count
+      friendsNeeded: this.settings.fixedTeams ? 0 : friendsNeeded(numPlayers),
       friendCalls: [], // [{suit, rank}]
       revealedFriends: [],
       teams: null,
@@ -373,12 +441,6 @@ class Game {
   }
 
   // ---------------- BID TIE-BREAK RUNOFF ----------------
-  // Two or more players tied for the lowest (winning) bid: propose an even lower point value
-  // (5 less) and ask just those tied players whether they'll play for it instead. Whoever's
-  // still willing when only one remains wins the bid at that lower value. If everyone still
-  // standing says no, the tie is settled with a coin flip and the bid stands at the last value
-  // they were tied at.
-
   startBidTiebreak(contenders, tiedValue) {
     const r = this.round;
     const nextValue = tiedValue - BID_POINTS_STEP;
@@ -504,6 +566,9 @@ class Game {
     if (r.friendsNeeded > 0) {
       r.friendCallDeadline = Date.now() + FRIEND_CALL_WINDOW_MS;
       this.phase = 'friendcall';
+    } else if (this.settings.fixedTeams) {
+      this.assignConfirmedFixedTeams();
+      this.beginPlay();
     } else {
       // only reachable with exactly 3 players: no friend calling, declarer plays solo
       this.assignSoloDeclarerTeam();

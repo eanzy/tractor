@@ -162,6 +162,9 @@ io.on('connection', (socket) => {
 
   socket.on('updateSettings', (patch) => withGame((game, playerId) => game.updateSettings(playerId, patch)));
 
+  socket.on('assignPlayerTeam', ({ playerId: targetId, team }) => withGame((game, playerId) => game.assignPlayerTeam(playerId, targetId, team)));
+  socket.on('confirmTeams', () => withGame((game, playerId) => game.confirmTeams(playerId)));
+
   socket.on('kickPlayer', ({ playerId: targetId }) => withGame((game, playerId) => {
     const removedId = game.kickPlayer(playerId, targetId);
     const kickedSocketId = playerSocketId.get(removedId);
