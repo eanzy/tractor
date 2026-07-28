@@ -129,6 +129,7 @@ body::before{
 .btn-ghost.tiny{ padding:3px 8px; font-size:14.5px; }
 .btn-secondary{ background:rgba(255,255,255,.08); color:var(--text); border-color:var(--panel-line); }
 .btn-danger{ background:rgba(156,43,43,.75); color:#fff; }
+.btn-danger.small{ width:auto; padding:7px 12px; font-size:14.5px; }
 
 .bid-slider-wrap{ margin:18px 0 14px; }
 .bid-slider-value{
@@ -200,8 +201,6 @@ body::before{
 .checkpoint-row select:disabled{ cursor:not-allowed; opacity:.5; }
 
 /* ---------------- Game screen ---------------- */
-/* fixed to the viewport height (not just min-height) so inner panels like the log scroll
-   within themselves instead of growing the whole page taller */
 .screen-game{ display:none; flex-direction:column; height:100vh; }
 .screen-game.active{ display:flex; }
 
@@ -223,6 +222,10 @@ body::before{
   border:1px solid var(--gold); color:var(--gold-bright);
   padding:6px 10px; border-radius:8px;
 }
+/* your own level, distinguished from the round's shared level-rank badge next to it */
+.level-badge.my-level{
+  background: radial-gradient(circle at 30% 25%, #1e5a44, var(--felt-1) 75%);
+}
 
 .table-felt{
   position:relative; flex:1; margin:14px 14px 0; border-radius:22px;
@@ -231,6 +234,9 @@ body::before{
   box-shadow: inset 0 0 80px rgba(0,0,0,.45), 0 20px 50px rgba(0,0,0,.35);
   min-height: 46vh;
   overflow:hidden;
+  /* flex column so table-center can bound itself to the felt's actual height and scroll its
+     own content internally, instead of overflowing content getting silently clipped */
+  display:flex; flex-direction:column;
 }
 
 .seats-ring{
@@ -252,8 +258,12 @@ body::before{
 
 .table-center{
   position:relative; z-index:2;
-  min-height:46vh;
-  display:flex; align-items:center; justify-content:center; flex-direction:column;
+  flex:1; min-height:0; overflow-y:auto;
+  display:flex; flex-direction:column;
+  /* "safe" centers normally but falls back to start-alignment when content overflows, so the
+     top of a tall panel (e.g. the bidding box) never gets pushed out of scrollable reach --
+     plain "center" would split the overflow evenly above/below, trapping the top off-screen */
+  align-items:safe center; justify-content:safe center;
   padding:70px 20px; gap:14px;
 }
 
@@ -287,8 +297,8 @@ body::before{
 .card.small .suit{ font-size:15px; }
 .card.red{ color:var(--lacquer); }
 .card.trump{ box-shadow: 0 0 0 2px var(--gold), 0 2px 6px rgba(0,0,0,.35); }
-.card.joker{ background: linear-gradient(160deg, #2c2418, #171310); color:var(--gold-bright); border-color:var(--gold);}
-.card.joker.big{ color:var(--lacquer-bright); }
+.card.joker{ background:var(--paper); border-color:var(--gold); } 
+.card.joker.big{ color:var(--lacquer); }
 .card.back{
   background: repeating-linear-gradient(45deg, #123a2c, #123a2c 4px, #0d3226 4px, #0d3226 8px);
   border-color:var(--gold);
@@ -299,6 +309,7 @@ body::before{
 }
 .hand-toolbar{
   display:flex; align-items:center; justify-content:space-between; margin-bottom:8px; gap:10px; flex-wrap:wrap;
+  max-height:120px; overflow-y:auto;
 }
 .turn-indicator{ font-size:19px; font-weight:700; color:var(--gold-bright); font-family:var(--font-display); }
 .action-buttons{ display:flex; gap:8px; flex-wrap:wrap; }
@@ -346,6 +357,8 @@ body::before{
   .card .rank{ font-size:17px; }
   .card .suit{ font-size:16px; }
   .table-felt{ margin:10px 10px 0; min-height:40vh; }
+  .table-center{ padding:36px 12px; } /* the 70px desktop padding eats too much on a short viewport */
+  .center-panel{ padding:14px 16px; }
   .lobby-card{ max-width:94vw; } /* 66vw would be too cramped on a phone */
   /* not enough room to sit side-by-side with the table: stack the log below instead */
   .game-body{ flex-direction:column; }

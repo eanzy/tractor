@@ -190,6 +190,29 @@ io.on('connection', (socket) => {
     game.startRound();
   }));
 
+  // Host closes the table for everyone. This tears the whole room down rather than mutating
+  // game state, so it bypasses withGame()'s normal "run action, then broadcast state" flow --
+  // there's no more game/room left to broadcast state for once this is done.
+  socket.on('endGame', () => {
+    const code = socketRoom.get(socket.id);
+    const game = rooms.get(code);
+    if (!game) return emitError(socket, 'Not in a room');
+    const playerId = socketPlayerId.get(socket.id) || socket.id;
+    if (playerId !== game.hostId) return emitError(socket, 'Only the host can end the game');
+
+    for (const p of game.players) {
+      const sid = playerSocketId.get(p.id);
+      if (!sid) continue;
+      const s = io.sockets.sockets.get(sid);
+      if (s) {
+        s.emit('gameEnded');
+        s.leave(code);
+      }
+      unlinkSocket(sid);
+    }
+    rooms.delete(code);
+  });
+
   socket.on('disconnect', () => {
     const code = socketRoom.get(socket.id);
     const game = rooms.get(code);

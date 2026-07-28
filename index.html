@@ -20,7 +20,7 @@
     <div class="card-panel">
       <label class="field">
         <span>Your name</span>
-        <input id="input-name" maxlength="16" placeholder="e.g. Wei" autocomplete="off" />
+        <input id="input-name" maxlength="16" placeholder="e.g. Emma" autocomplete="off" />
       </label>
 
       <div class="tabs">
@@ -61,18 +61,18 @@
           <input type="checkbox" id="setting-negative-scores" />
           <span>Negative scores</span>
         </label>
-        <p class="hint">When on, a declarer who loses while already at level 2 falls into debt (2-1, 2-2, …) instead of staying capped at 2 — trump is still dealt at 2, but they have to climb back out of the deficit before advancing to 3.</p>
+        <p class="hint">When on, a declarer who loses while already at level 2 falls into debt (2-1, 2-2, …) instead of staying capped at 2 — trump is still dealt at 2.</p>
 
         <div class="checkpoint-rows" id="checkpoint-rows">
           <!-- one row per checkpoint rank (5/10/K/A), built by client.js -->
         </div>
-        <p class="hint">Checkpoints: set how many extra wins (0–5) a player must earn at that level (5, 10, K, or A) before advancing past it — e.g. 2 extra wins at 5 means 5 → 5+1 → 5+2 → 6. Trump is still dealt at the checkpoint's own rank the whole time. 0 means no extra requirement.</p>
+        <p class="hint">Checkpoints: set how many extra wins (0–5) a player must earn at that level (5, 10, K, or A) before advancing past it — e.g. 2 extra wins at 5 means 5 → 5+1 → 5+2 → 6. Trump is still dealt at the checkpoint's own rank the whole time.</p>
 
         <label class="toggle-row">
           <input type="checkbox" id="setting-loser-skips-bidding" />
           <span>Loser sits out every other round</span>
         </label>
-        <p class="hint">When on, whoever is alone in last place can bid the first round they fall there, then must sit out the next round, then can bid again, and so on. A tie for last lifts the restriction for everyone.</p>
+        <p class="hint">When on, whoever is alone in last place can only bid every other turn.</p>
 
         <label class="checkpoint-row">
           <span>Bidding timer</span>
@@ -82,13 +82,13 @@
             <option value="60000">1 minute</option>
           </select>
         </label>
-        <p class="hint">How long players have to submit a sealed bid before bidding auto-closes. With it off, bidding only ends once everyone has bid or passed.</p>
+        <p class="hint">How long players have to submit a sealed bid before bidding auto-closes.</p>
 
         <label class="toggle-row">
           <input type="checkbox" id="setting-fixed-teams" />
-          <span>Set teams (host assigns partners)</span>
+          <span>Set teams</span>
         </label>
-        <p class="hint">Even player counts only. Instead of find-a-friend, you assign fixed partnerships yourself — once confirmed, seats rearrange so partners alternate around the table for the rest of the game.</p>
+        <p class="hint">Even player counts only. Instead of find-a-friend, fixed partners are assigned.</p>
         <div class="team-assign-rows" id="team-assign-rows"></div>
         <button id="btn-confirm-teams" class="btn btn-secondary" style="margin-top:8px;">Confirm teams</button>
         <p class="hint" id="team-assign-status"></p>
@@ -96,6 +96,7 @@
 
       <button id="btn-start" class="btn btn-primary" disabled>Waiting for 3+ players…</button>
       <p class="hint" id="lobby-note"></p>
+      <button id="btn-end-game-lobby" class="btn btn-danger" style="margin-top:10px; display:none;">End game</button>
     </div>
   </section>
 
@@ -107,8 +108,10 @@
       </div>
       <div class="topbar-center" id="tb-phase">Lobby</div>
       <div class="topbar-right">
-        <div class="level-badge" id="level-rank" title="This round's level rank">Level 2</div>
+        <div class="level-badge my-level" id="my-level" title="Your own personal level">You: 2</div>
+        <div class="level-badge" id="level-rank" title="This round's level rank">This Round's Level 2</div>
         <button id="btn-log-toggle" class="btn btn-ghost small">Log</button>
+        <button id="btn-end-game" class="btn btn-danger small" style="display:none;">End game</button>
       </div>
     </header>
 

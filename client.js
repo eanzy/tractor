@@ -111,6 +111,12 @@ document.getElementById('btn-confirm-teams').addEventListener('click', () => {
   socket.emit('confirmTeams');
 });
 
+function confirmEndGame() {
+  if (confirm('Are you sure? This will end the game for everyone.')) socket.emit('endGame');
+}
+document.getElementById('btn-end-game-lobby').addEventListener('click', confirmEndGame);
+document.getElementById('btn-end-game').addEventListener('click', confirmEndGame);
+
 buildCheckpointRows();
 function buildCheckpointRows() {
   const container = document.getElementById('checkpoint-rows');
@@ -164,6 +170,13 @@ socket.on('kicked', () => {
   clearSession();
   showScreen('screen-connect');
   showConnectError('The host removed you from the table.');
+});
+
+socket.on('gameEnded', () => {
+  state = null;
+  clearSession();
+  showScreen('screen-connect');
+  showConnectError('The host ended the game for everyone.');
 });
 
 // ---------------- state handling ----------------
@@ -251,6 +264,8 @@ function renderLobby() {
     btn.textContent = isHost ? `Start round · ${n} players` : `Waiting for host to start (${n} players)`;
     note.textContent = isHost ? '' : 'Only the host can start the round.';
   }
+
+  document.getElementById('btn-end-game-lobby').style.display = isHost ? '' : 'none';
 }
 
 function renderTeamAssignRows(isHost, fixedTeamsOn) {
@@ -307,6 +322,8 @@ function renderGame() {
     ? (state.round.levelRank !== null ? state.round.levelRank : '?') // not known until the declarer is decided
     : (me() ? me().level : '2');
   document.getElementById('level-rank').textContent = `Level ${levelRankText}`;
+  document.getElementById('my-level').textContent = `You: ${me() ? formatLevel(me()) : '2'}`;
+  document.getElementById('btn-end-game').style.display = (myId === state.hostId) ? '' : 'none';
 
   renderLog();
   renderSeats();
@@ -328,9 +345,6 @@ function phaseLabel(p) {
 
 function renderLog() {
   const list = document.getElementById('log-list');
-  // only snap to the newest entry if the user was already at (or near) the bottom -- otherwise
-  // this rebuild (which happens on every state update, i.e. constantly during play) would yank
-  // them back down the instant they scroll up to read earlier entries
   const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 40;
   list.innerHTML = '';
   (state.log || []).forEach(entry => {
@@ -442,7 +456,7 @@ function renderBiddingCenter(r) {
 
   const p = panel(`
     <h3>Bidding</h3>
-    <p>Bids are sealed — nobody (including you) sees anyone else's bid until bidding closes for everyone. The <b>lowest</b> bid wins and becomes declarer — a lower number is a bolder claim, since it means holding the challengers under fewer points.</p>
+    <p>Bid for the <b>lowest</b> lowest number of points you can defend as the declarer. Ties are resolved in a runoff</p>
     ${blockedNote}
     <div class="bid-slider-wrap">
       <div class="bid-slider-value" id="bid-slider-value">${bidSliderValue}</div>
@@ -747,10 +761,6 @@ function escapeHtml(s) {
   return (s || '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 }
 
-// periodic in-place countdown updates -- these deliberately never call renderCenter()/innerHTML
-// during a live phase, since rebuilding the DOM every second would tear down and recreate any
-// interactive controls (dropdowns, buttons) underneath the player's cursor, resetting selections
-// and making things hard to click ("the screen jumps")
 function tickBiddingCountdown(r) {
   const countdownEl = document.getElementById('bid-countdown');
   const fillEl = document.getElementById('bid-timer-fill');
@@ -771,8 +781,12 @@ setInterval(() => {
   if (state.phase === 'bidding') tickBiddingCountdown(state.round);
   else if (state.phase === 'trumpselect') tickTrumpSelectCountdown(state.round);
   else if (state.phase === 'bidtiebreak' && state.round.bidTiebreak) tickBidTiebreakCountdown(state.round);
-  // friendcall shows no live countdown, so there's nothing to tick -- the friend-picker's
-  // dropdowns just sit undisturbed until the declarer submits or the state actually changes
 }, 1000);
+
+// on a small/mobile screen, start with the log panel closed -- there's no room to show it
+// alongside the table, and forcing it open would just cover the game
+if (window.matchMedia('(max-width: 640px)').matches) {
+  document.getElementById('log-panel').classList.add('hidden');
+}
 
 showScreen('screen-connect');
