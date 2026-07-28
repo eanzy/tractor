@@ -15,6 +15,22 @@ const socketRoom = new Map(); // socket.id -> roomCode
 // a reconnect (refresh, network drop) gets a brand-new socket.id, so the STABLE player id
 // (assigned once, on first join) is tracked separately from whichever socket is currently live
 const socketPlayerId = new Map(); // socket.id -> stable player id
+// reverse of the above: Socket.IO only auto-routes a message to a socket via a room matching
+// its OWN (current) id, so broadcasting to a player's STABLE id silently reaches nobody once
+// that id no longer belongs to any live socket (i.e. after any reconnect). This map is the only
+// reliable way to find "which socket is currently live for this player" when emitting state.
+const playerSocketId = new Map(); // stable player id -> current socket.id
+
+function linkPlayer(playerId, socketId) {
+  socketPlayerId.set(socketId, playerId);
+  playerSocketId.set(playerId, socketId);
+}
+function unlinkSocket(socketId) {
+  const playerId = socketPlayerId.get(socketId);
+  if (playerId && playerSocketId.get(playerId) === socketId) playerSocketId.delete(playerId);
+  socketPlayerId.delete(socketId);
+  socketRoom.delete(socketId);
+}
 
 function makeRoomCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -26,7 +42,11 @@ function makeRoomCode() {
 }
 
 function emitState(game) {
-  game.broadcast(io);
+  for (const p of game.players) {
+    const socketId = playerSocketId.get(p.id);
+    if (!socketId) continue; // no live connection for this player right now
+    io.to(socketId).emit('state', game.publicState(p.id));
+  }
 }
 
 function emitError(socket, message) {
@@ -82,7 +102,7 @@ io.on('connection', (socket) => {
     game.addPlayer(socket.id, name || 'Player');
     socket.join(code);
     socketRoom.set(socket.id, code);
-    socketPlayerId.set(socket.id, socket.id);
+    linkPlayer(socket.id, socket.id);
     cb && cb({ ok: true, roomCode: code, playerId: socket.id });
     emitState(game);
   });
@@ -100,7 +120,7 @@ io.on('connection', (socket) => {
       game.reconnectPlayer(existing.id);
       socket.join(code);
       socketRoom.set(socket.id, code);
-      socketPlayerId.set(socket.id, existing.id);
+      linkPlayer(existing.id, socket.id);
       cb && cb({ ok: true, roomCode: code, playerId: existing.id });
       emitState(game);
       return;
@@ -116,7 +136,7 @@ io.on('connection', (socket) => {
     }
     socket.join(code);
     socketRoom.set(socket.id, code);
-    socketPlayerId.set(socket.id, socket.id);
+    linkPlayer(socket.id, socket.id);
     cb && cb({ ok: true, roomCode: code, playerId: socket.id });
     emitState(game);
   });
@@ -144,15 +164,14 @@ io.on('connection', (socket) => {
 
   socket.on('kickPlayer', ({ playerId: targetId }) => withGame((game, playerId) => {
     const removedId = game.kickPlayer(playerId, targetId);
-    for (const [sid, pid] of socketPlayerId.entries()) {
-      if (pid !== removedId) continue;
-      const kickedSocket = io.sockets.sockets.get(sid);
+    const kickedSocketId = playerSocketId.get(removedId);
+    if (kickedSocketId) {
+      const kickedSocket = io.sockets.sockets.get(kickedSocketId);
       if (kickedSocket) {
         kickedSocket.emit('kicked');
-        kickedSocket.leave(socketRoom.get(sid));
+        kickedSocket.leave(socketRoom.get(kickedSocketId));
       }
-      socketRoom.delete(sid);
-      socketPlayerId.delete(sid);
+      unlinkSocket(kickedSocketId);
     }
   }));
 
@@ -172,12 +191,11 @@ io.on('connection', (socket) => {
     const code = socketRoom.get(socket.id);
     const game = rooms.get(code);
     const playerId = socketPlayerId.get(socket.id);
+    unlinkSocket(socket.id);
     if (game && playerId) {
       game.removePlayer(playerId);
       emitState(game);
     }
-    socketRoom.delete(socket.id);
-    socketPlayerId.delete(socket.id);
   });
 });
 

@@ -229,12 +229,6 @@ class Game {
     return base;
   }
 
-  broadcast(io) {
-    for (const p of this.players) {
-      io.to(p.id).emit('state', this.publicState(p.id));
-    }
-  }
-
   addLog(msg, opts = {}) {
     this.log.push({ t: Date.now(), msg, bold: !!opts.bold });
   }
