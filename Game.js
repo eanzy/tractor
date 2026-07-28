@@ -514,7 +514,6 @@ class Game {
   }
 
   // ---------------- TRUMP SELECTION (declarer only, after bidding is settled) ----------------
-
   chooseTrump(playerId, suit) {
     const r = this.round;
     if (this.phase !== 'trumpselect') throw new Error('Not in trump selection phase');
@@ -531,7 +530,6 @@ class Game {
   }
 
   // Once trump is settled, everyone's hand (not just the declarer's) gets re-sorted so jokers,
-  // level-rank cards, and the trump suit all group together as one contiguous "trump" block.
   resortAllHandsForTrump() {
     const r = this.round;
     for (const p of this.players) sortHand(r.hands[p.id], r.trumpSuit, r.levelRank);

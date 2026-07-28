@@ -126,6 +126,13 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // a brand-new player (not reconnecting) can only join while still in the lobby -- adding
+    // them mid-round would leave them with no hand/team in the in-progress round, which crashes
+    // anything that iterates every player expecting one (e.g. re-sorting hands after trump)
+    if (game.phase !== 'lobby') {
+      return cb && cb({ ok: false, error: 'This game has already started. Wait for it to finish, or ask the host to end it and start a new one.' });
+    }
+
     if (game.players.length >= 8) {
       return cb && cb({ ok: false, error: 'Room is full' });
     }
