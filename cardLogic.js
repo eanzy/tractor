@@ -48,7 +48,7 @@ function shuffle(arr) {
 function computeDealPlan(numPlayers) {
   const numDecks = Math.min(4, Math.max(2, Math.ceil(numPlayers / 2)));
   const total = numDecks * 54;
-  let perPlayer = Math.floor(total / numPlayers);
+  let perPlayer = Math.ceil(total / numPlayers);
   let kitty = total - perPlayer * numPlayers;
   const minKitty = Math.max(4, numPlayers); // keep the kitty a reasonably meaty buffer
   while (kitty < minKitty) {
@@ -138,6 +138,8 @@ function classifyCombo(cards, trumpSuit, levelRank) {
       }).sort((a, b) => a - b);
       let consecutive = true;
       for (let i = 1; i < strengths.length; i++) {
+        // tractor on each side of the level rank is a tractor (e.g: level is 5, 4466 is a tractor)
+        if (strengths[i] == levelRank + 1 & strengths[i-1] == levelRank - 1) {break}
         if (strengths[i] !== strengths[i - 1] + 1) { consecutive = false; break; }
       }
       // jokers can't chain into a tractor with rank cards; guard: strengths must all be >=500 range consistently
